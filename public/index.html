@@ -1,0 +1,395 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediaPipe Pose Tracking</title>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      text-align: center;
+      background-color: #f4f4f4;
+    }
+    
+    h1 {
+      color: #333;
+    }
+    
+    .container {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      margin-top: 20px;
+    }
+    
+    #webcam {
+      border: 3px solid #333;
+      border-radius: 8px;
+      max-width: 100%;
+      height: auto;
+    }
+    
+    #output-canvas {
+      position: absolute;
+      border: 3px solid #333;
+      border-radius: 8px;
+      max-width: 100%;
+      height: auto;
+    }
+    
+    .buttons {
+      margin: 20px 0;
+    }
+    
+    button {
+      padding: 10px 20px;
+      margin: 0 10px;
+      background-color: #4285f4;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    
+    button:hover {
+      background-color: #3367d6;
+    }
+    
+    button:disabled {
+      background-color: #cccccc;
+      cursor: not-allowed;
+    }
+    
+    .status {
+      margin-top: 20px;
+      font-size: 18px;
+      font-weight: bold;
+    }
+    
+    .osc-settings {
+      margin-top: 20px;
+      padding: 15px;
+      background-color: #e9e9e9;
+      border-radius: 8px;
+      max-width: 640px;
+      text-align: left;
+    }
+    
+    .osc-settings h3 {
+      margin-top: 0;
+    }
+    
+    .settings-row {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      align-items: center;
+    }
+    
+    .settings-row label {
+      font-weight: bold;
+      margin-right: 10px;
+    }
+    
+    .settings-row input {
+      padding: 5px;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+      width: 100px;
+    }
+    
+    .osc-status {
+      font-weight: bold;
+      color: #4285f4;
+    }
+  </style>
+</head>
+<body>
+  <h1>MediaPipe Pose Tracking Demo</h1>
+
+  <div class="container">
+    <div style="position: relative;">
+      <video id="webcam" width="640" height="480" autoplay></video>
+      <canvas id="output-canvas" width="640" height="480"></canvas>
+    </div>
+    
+    <div class="buttons">
+      <button id="start-btn">Start Camera</button>
+      <button id="stop-btn" disabled>Stop Camera</button>
+      <button id="osc-btn">Start OSC</button>
+    </div>
+    
+    <div class="status" id="status">Camera is off</div>
+    <div class="osc-status" id="osc-status">OSC is inactive</div>
+    
+    <div class="osc-settings">
+      <h3>OSC Settings</h3>
+      <div class="settings-row">
+        <label for="osc-port">Port:</label>
+        <input type="number" id="osc-port" value="9000">
+      </div>
+      <div class="settings-row">
+        <label for="osc-address">Address:</label>
+        <input type="text" id="osc-address" value="/mediapipe/pose">
+      </div>
+      <div class="settings-row">
+        <label for="osc-host">Host:</label>
+        <input type="text" id="osc-host" value="localhost">
+      </div>
+    </div>
+  </div>
+
+  <!-- Import MediaPipe Pose solution from CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+  <!-- No OSC.js import as we'll use fetch API instead -->
+
+  <script>
+    const videoElement = document.getElementById('webcam');
+    const canvasElement = document.getElementById('output-canvas');
+    const canvasCtx = canvasElement.getContext('2d');
+    const startBtn = document.getElementById('start-btn');
+    const stopBtn = document.getElementById('stop-btn');
+    const oscBtn = document.getElementById('osc-btn');
+    const statusElement = document.getElementById('status');
+    const oscStatusElement = document.getElementById('osc-status');
+    const oscPortInput = document.getElementById('osc-port');
+    const oscAddressInput = document.getElementById('osc-address');
+    const oscHostInput = document.getElementById('osc-host');
+    
+    let camera;
+    let activePose = false;
+    let sendOSC = false;
+    let osc;
+    let oscSocket;
+    
+    // MediaPipe landmark names for proper labeling in OSC messages
+    const landmarkNames = [
+      'nose',
+      'left_eye_inner', 'left_eye', 'left_eye_outer',
+      'right_eye_inner', 'right_eye', 'right_eye_outer',
+      'left_ear', 'right_ear',
+      'mouth_left', 'mouth_right',
+      'left_shoulder', 'right_shoulder',
+      'left_elbow', 'right_elbow',
+      'left_wrist', 'right_wrist',
+      'left_pinky', 'right_pinky',
+      'left_index', 'right_index',
+      'left_thumb', 'right_thumb',
+      'left_hip', 'right_hip',
+      'left_knee', 'right_knee',
+      'left_ankle', 'right_ankle',
+      'left_heel', 'right_heel',
+      'left_foot_index', 'right_foot_index'
+    ];
+    
+    // Setup the MediaPipe Pose instance
+    const pose = new Pose({
+      locateFile: (file) => {
+        return `https://cdn.jsdelivr.net/npm/@mediapipe/pose/${file}`;
+      }
+    });
+    
+    // Set pose configuration
+    pose.setOptions({
+      modelComplexity: 1,
+      smoothLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+    
+    // Initialize OSC
+    function initOSC() {
+      const port = parseInt(oscPortInput.value);
+      const host = oscHostInput.value;
+      
+      try {
+        // Test the connection with a simple request
+        fetch(`/api/test-osc?port=${port}&host=${host}`, {
+          method: 'POST'
+        })
+        .then(response => {
+          if (response.ok) {
+            sendOSC = true;
+            oscStatusElement.textContent = `OSC active - sending to ${host}:${port}`;
+            oscStatusElement.style.color = '#00AA00';
+            oscBtn.textContent = 'Stop OSC';
+          } else {
+            throw new Error('Failed to connect to OSC server');
+          }
+        })
+        .catch(error => {
+          console.error('Error connecting to OSC:', error);
+          oscStatusElement.textContent = 'OSC connection error';
+          oscStatusElement.style.color = '#AA0000';
+          oscBtn.textContent = 'Start OSC';
+        });
+      } catch (err) {
+        console.error('Error initializing OSC:', err);
+        oscStatusElement.textContent = 'Error initializing OSC';
+        oscStatusElement.style.color = '#AA0000';
+      }
+    }
+    
+    // Send pose data via OSC
+    function sendPoseDataOSC(poseLandmarks) {
+      if (!sendOSC) {
+        return;
+      }
+      
+      const oscAddress = oscAddressInput.value;
+      const port = parseInt(oscPortInput.value);
+      const host = oscHostInput.value;
+      
+      // Create a clean object with just the data we need
+      const landmarkData = poseLandmarks.map((landmark, index) => {
+        return {
+          name: landmarkNames[index] || `landmark_${index}`,
+          x: landmark.x,
+          y: landmark.y,
+          z: landmark.z,
+          visibility: landmark.visibility
+        };
+      });
+      
+      // Send data to server, which will forward it via OSC
+      fetch('/api/send-osc', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          address: oscAddress,
+          port: port,
+          host: host,
+          landmarks: landmarkData
+        })
+      }).catch(err => {
+        console.error('Error sending OSC data:', err);
+        // Don't disable OSC on transient errors
+      });
+    }
+    
+    // Setup the callback that gets triggered when pose detection results are available
+    pose.onResults(results => {
+      // Clear the canvas
+      canvasCtx.save();
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      
+      // Draw the pose landmarks
+      if (results.poseLandmarks) {
+        // Draw the pose landmarks
+        drawConnectors(canvasCtx, results.poseLandmarks, POSE_CONNECTIONS, 
+          { color: '#00FF00', lineWidth: 4 });
+        drawLandmarks(canvasCtx, results.poseLandmarks, 
+          { color: '#FF0000', lineWidth: 2, radius: 6 });
+        
+        statusElement.textContent = 'Pose tracking active';
+        
+        // Send OSC if enabled
+        if (sendOSC) {
+          sendPoseDataOSC(results.poseLandmarks);
+        }
+      } else {
+        statusElement.textContent = 'No pose detected';
+      }
+      
+      canvasCtx.restore();
+    });
+    
+    // Initialize the camera
+    startBtn.addEventListener('click', () => {
+      activePose = true;
+      startCamera();
+      startBtn.disabled = true;
+      stopBtn.disabled = false;
+    });
+    
+    stopBtn.addEventListener('click', () => {
+      stopCamera();
+      startBtn.disabled = false;
+      stopBtn.disabled = true;
+      statusElement.textContent = 'Camera is off';
+    });
+    
+    // Toggle OSC connection
+    oscBtn.addEventListener('click', () => {
+      if (sendOSC) {
+        // Stop OSC
+        sendOSC = false;
+        oscStatusElement.textContent = 'OSC is inactive';
+        oscStatusElement.style.color = '#4285f4';
+        oscBtn.textContent = 'Start OSC';
+        
+        // Notify the server to clean up any OSC connections
+        fetch('/api/stop-osc', {
+          method: 'POST'
+        }).catch(err => {
+          console.error('Error stopping OSC:', err);
+        });
+      } else {
+        // Start OSC
+        initOSC();
+      }
+    });
+    
+    function startCamera() {
+      // Check if the Camera class is available from the MediaPipe camera_utils
+      if (typeof Camera !== 'undefined') {
+        camera = new Camera(videoElement, {
+          onFrame: async () => {
+            if (activePose) {
+              await pose.send({ image: videoElement });
+            }
+          },
+          width: 640,
+          height: 480
+        });
+        camera.start();
+      } else {
+        // Fallback method if Camera is not available
+        navigator.mediaDevices.getUserMedia({video: true})
+          .then(stream => {
+            videoElement.srcObject = stream;
+            videoElement.onloadedmetadata = () => {
+              videoElement.play();
+              statusElement.textContent = 'Camera started (fallback mode)';
+              
+              // Set up a frame processing loop
+              const processFrame = async () => {
+                if (activePose) {
+                  await pose.send({image: videoElement});
+                  if (activePose) requestAnimationFrame(processFrame);
+                }
+              };
+              requestAnimationFrame(processFrame);
+            };
+          })
+          .catch(err => {
+            console.error('Error accessing camera:', err);
+            statusElement.textContent = 'Error accessing camera';
+          });
+      }
+    }
+    
+    function stopCamera() {
+      activePose = false;
+      
+      if (camera) {
+        camera.stop();
+      } else if (videoElement.srcObject) {
+        // Stop all tracks from the stream for fallback method
+        videoElement.srcObject.getTracks().forEach(track => track.stop());
+        videoElement.srcObject = null;
+      }
+      
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+      statusElement.textContent = 'Camera is off';
+    }
+  </script>
+</body>
+</html>
